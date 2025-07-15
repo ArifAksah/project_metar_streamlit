@@ -1,0 +1,6 @@
+streamlit
+streamlit-authenticator
+pyyaml
+pandas
+altair
+aiohttp
