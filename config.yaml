@@ -1,0 +1,24 @@
+credentials:
+  usernames:
+    # Key utama adalah username (harus unik)
+    sbdm:
+      email: bmkg_ddk@sampel.com
+      name: SBDM
+      # Salin HASH dari script sebelumnya, BUKAN password asli
+      password: '$2b$12$VSv39U0GKcGjHDk.hFKPPOrNnqOzYWg8XwU4EWDiPFIg0Hw00Wzam'
+    admin:
+      email: admin@example.com
+      name: Rebecca Briggs
+      password: '$2b$12$noMWgbezPYJ2RxBi9z9/J.4xYpFBNw/s6/cMnLt2dSwP6SZ0gNm..'
+
+cookie:
+  # Nama cookie yang akan disimpan di browser
+  name: some_cookie_name
+  # Kunci rahasia untuk menandatangani cookie (buat string acak)
+  key: some_secret_key_123
+  # Masa berlaku cookie dalam hari
+  expiry_days: 30
+
+preauthorized:
+  emails:
+    - arifrpl123@gmail.com
