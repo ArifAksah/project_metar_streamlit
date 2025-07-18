@@ -81,7 +81,8 @@ async def fetch_all_metar(token, session, tahun, bulan):
         except Exception: break
     return all_data
 
-def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan):
+# --- FUNGSI ANALISIS DIPERBARUI DENGAN PILIHAN MODE KALKULASI ---
+def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, calculation_mode):
     harian_per_stasiun = defaultdict(lambda: defaultdict(set))
     for item in metar_data:
         cccc, timestamp = item.get("cccc"), item.get("timestamp_data")
@@ -102,53 +103,49 @@ def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan):
             info_stasiun = station_info_map[cccc]
             jam_operasi = info_stasiun.get("jam_operasi", 24)
             waktu_data = harian_per_stasiun[tanggal_str].get(cccc, set())
-            
             sends_half_hourly = info_stasiun.get("sends_half_hourly", False)
-            laporan_per_jam = 2 if sends_half_hourly else 1
-            maksimal_data = jam_operasi * laporan_per_jam
-            
-            # --- LOGIKA BARU: MENGHITUNG LAPORAN MASUK UNIK PER SLOT WAKTU ---
-            if not waktu_data:
-                jumlah_data = 0
-            elif sends_half_hourly:
-                # Untuk interval 30 menit, hitung slot unik (misal: 08:00-08:29 dan 08:30-08:59)
-                slot_unik = set()
-                for w in waktu_data:
-                    jam, menit = map(int, w.split(':'))
-                    slot = f"{jam:02d}:00" if menit < 30 else f"{jam:02d}:30"
-                    slot_unik.add(slot)
-                jumlah_data = len(slot_unik)
-            else:
-                # Untuk interval 1 jam, hitung jam unik saja
+
+            # --- LOGIKA PERHITUNGAN BARU BERDASARKAN MODE YANG DIPILIH ---
+            if calculation_mode == "Paksa Interval 1 Jam":
+                laporan_per_jam = 1
                 jam_unik = {w.split(':')[0] for w in waktu_data}
                 jumlah_data = len(jam_unik)
+            else: # Mode "Otomatis"
+                laporan_per_jam = 2 if sends_half_hourly else 1
+                if not waktu_data:
+                    jumlah_data = 0
+                elif sends_half_hourly:
+                    slot_unik = {f"{w.split(':')[0]}:00" if int(w.split(':')[1]) < 30 else f"{w.split(':')[0]}:30" for w in waktu_data}
+                    jumlah_data = len(slot_unik)
+                else:
+                    jam_unik = {w.split(':')[0] for w in waktu_data}
+                    jumlah_data = len(jam_unik)
 
+            maksimal_data = jam_operasi * laporan_per_jam
             persentase = round((jumlah_data / maksimal_data) * 100, 2) if maksimal_data else 0
+            
             flags = []
             if jumlah_data > maksimal_data and maksimal_data > 0:
-                flags.append(f"⚠️ Data melebihi ekspektasi. Kemungkinan stasiun mengirim data di luar jam operasional yang terdaftar ({jam_operasi} jam).")
+                flags.append(f"⚠️ Data anomali, melebihi ekspektasi ({jam_operasi} jam).")
             elif jumlah_data == 0:
                 flags.append("❌ Tidak ada data")
             elif jumlah_data < (maksimal_data * 0.5):
                 flags.append("⚠️ Kurang dari 50%")
             
             if jam_operasi < 24 and not (jumlah_data > maksimal_data):
-                 flags.append(f"🕒 Op: {jam_operasi} jam")
+                flags.append(f"🕒 Op: {jam_operasi} jam")
             
-            # --- PENAMBAHAN KOLOM "INTERVAL PENGIRIMAN" ---
             rows.append({
                 "Nomor": nomor, "WMO ID": info_stasiun.get("wmo_id", "-"), "Tanggal": tanggal_str, 
                 "ICAO": cccc, "Nama Stasiun": info_stasiun.get("stasiun", "-"),
-                "Jam Operasional": jam_operasi, 
-                "Interval Pengiriman": "30 Menit" if sends_half_hourly else "1 Jam",
-                "Laporan Diharapkan": maksimal_data,
-                "Laporan Masuk": jumlah_data, "Ketersediaan (%)": persentase, 
-                "Catatan": "; ".join(flags) if flags else "✅ Lengkap"
+                "Jam Operasional": jam_operasi, "Interval Pengiriman": "30 Menit" if sends_half_hourly else "1 Jam",
+                "Laporan Diharapkan": maksimal_data, "Laporan Masuk": jumlah_data, 
+                "Ketersediaan (%)": persentase, "Catatan": "; ".join(flags) if flags else "✅ Lengkap"
             })
             nomor += 1
     return pd.DataFrame(rows)
 
-async def run_full_analysis(tahun, bulan):
+async def run_full_analysis(tahun, bulan, calculation_mode):
     token = await login_bmgk()
     if not token: return None
     
@@ -165,7 +162,7 @@ async def run_full_analysis(tahun, bulan):
             st.error("Gagal memuat data stasiun. Proses dibatalkan.")
             return None
     
-    df = process_and_analyze_metar(metar_data, station_info_map, tahun, bulan)
+    df = process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, calculation_mode)
     return df
 
 # ===================== AUTENTIKASI =====================
@@ -198,6 +195,13 @@ with st.form("form_analisis"):
     with col2:
         tahun = st.number_input("📅 Masukkan Tahun", min_value=2000, max_value=2100, value=datetime.now().year)
     
+    # --- FITUR BARU: PILIHAN MODE KALKULASI ---
+    calculation_mode = st.radio(
+        "Pilih Mode Kalkulasi",
+        ["Otomatis (berdasarkan interval stasiun)", "Paksa Interval 1 Jam (abaikan interval stasiun)"],
+        key="calc_mode"
+    )
+    
     st.markdown("---")
     st.markdown("### 2. Saring Hasil Tampilan (Opsional)")
     
@@ -211,10 +215,13 @@ with st.form("form_analisis"):
 
 if submit:
     with st.spinner("⏳ Mengambil & memproses data dari API secara paralel..."):
-        df = asyncio.run(run_full_analysis(tahun, bulan))
+        df = asyncio.run(run_full_analysis(tahun, bulan, calculation_mode))
 
     if df is not None and not df.empty:
         st.success("✅ Data berhasil dianalisis.")
+        
+        # Sisa kode untuk filtering tampilan dan visualisasi tidak berubah
+        # ... (Kode untuk filter tampilan dan visualisasi tetap sama)
         
         st.markdown("### Saring Hasil Analisis")
         fcol1, fcol2, fcol3 = st.columns(3)
