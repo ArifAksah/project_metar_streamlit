@@ -31,7 +31,11 @@ async def login_bmgk():
 async def fetch_all_stations_info(token, session):
     station_map = {}
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"type_name": "BmkgStation", "_metadata": "station_name,station_operating_hours,station_icao,station_wmo_id", "_size": 2000}
+    params = {
+        "type_name": "BmkgStation", 
+        "_metadata": "station_name,station_operating_hours,station_icao,station_wmo_id,is_metar_half_hourly", 
+        "_size": 2000
+    }
     url = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu//@search"
     try:
         async with session.get(url, headers=headers, params=params, timeout=30) as response:
@@ -42,7 +46,13 @@ async def fetch_all_stations_info(token, session):
                 if not icao: continue
                 op_hours = item.get("station_operating_hours", 24)
                 if not isinstance(op_hours, int) or not (0 < op_hours <= 24): op_hours = 24
-                station_map[icao] = {"stasiun": item.get("station_name", "-"), "wmo_id": item.get("station_wmo_id", "-"), "jam_operasi": op_hours}
+                
+                station_map[icao] = {
+                    "stasiun": item.get("station_name", "-"), 
+                    "wmo_id": item.get("station_wmo_id", "-"), 
+                    "jam_operasi": op_hours,
+                    "sends_half_hourly": item.get("is_metar_half_hourly", False)
+                }
             return station_map
     except Exception as e:
         st.warning(f"Gagal mengambil info stasiun: {e}")
@@ -71,7 +81,7 @@ async def fetch_all_metar(token, session, tahun, bulan):
         except Exception: break
     return all_data
 
-def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, use_interval_filter=False):
+def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan):
     harian_per_stasiun = defaultdict(lambda: defaultdict(set))
     for item in metar_data:
         cccc, timestamp = item.get("cccc"), item.get("timestamp_data")
@@ -92,32 +102,53 @@ def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, use_in
             info_stasiun = station_info_map[cccc]
             jam_operasi = info_stasiun.get("jam_operasi", 24)
             waktu_data = harian_per_stasiun[tanggal_str].get(cccc, set())
-
-            if use_interval_filter:
-                jam_tercatat = {w.split(':')[0] for w in waktu_data}
-                jumlah_data = len(jam_tercatat)
-                maksimal_data = jam_operasi
-            else:
-                jumlah_data = len(waktu_data)
-                maksimal_data = jam_operasi * 2
             
+            sends_half_hourly = info_stasiun.get("sends_half_hourly", False)
+            laporan_per_jam = 2 if sends_half_hourly else 1
+            maksimal_data = jam_operasi * laporan_per_jam
+            
+            # --- LOGIKA BARU: MENGHITUNG LAPORAN MASUK UNIK PER SLOT WAKTU ---
+            if not waktu_data:
+                jumlah_data = 0
+            elif sends_half_hourly:
+                # Untuk interval 30 menit, hitung slot unik (misal: 08:00-08:29 dan 08:30-08:59)
+                slot_unik = set()
+                for w in waktu_data:
+                    jam, menit = map(int, w.split(':'))
+                    slot = f"{jam:02d}:00" if menit < 30 else f"{jam:02d}:30"
+                    slot_unik.add(slot)
+                jumlah_data = len(slot_unik)
+            else:
+                # Untuk interval 1 jam, hitung jam unik saja
+                jam_unik = {w.split(':')[0] for w in waktu_data}
+                jumlah_data = len(jam_unik)
+
             persentase = round((jumlah_data / maksimal_data) * 100, 2) if maksimal_data else 0
             flags = []
-            if jumlah_data == 0: flags.append("❌ Tidak ada data")
-            elif jumlah_data < (maksimal_data * 0.5): flags.append("⚠️ Kurang dari 50%")
-            if jam_operasi < 24: flags.append(f"🕒 Op: {jam_operasi} jam")
+            if jumlah_data > maksimal_data and maksimal_data > 0:
+                flags.append(f"⚠️ Data melebihi ekspektasi. Kemungkinan stasiun mengirim data di luar jam operasional yang terdaftar ({jam_operasi} jam).")
+            elif jumlah_data == 0:
+                flags.append("❌ Tidak ada data")
+            elif jumlah_data < (maksimal_data * 0.5):
+                flags.append("⚠️ Kurang dari 50%")
             
+            if jam_operasi < 24 and not (jumlah_data > maksimal_data):
+                 flags.append(f"🕒 Op: {jam_operasi} jam")
+            
+            # --- PENAMBAHAN KOLOM "INTERVAL PENGIRIMAN" ---
             rows.append({
                 "Nomor": nomor, "WMO ID": info_stasiun.get("wmo_id", "-"), "Tanggal": tanggal_str, 
                 "ICAO": cccc, "Nama Stasiun": info_stasiun.get("stasiun", "-"),
-                "Jam Operasional": jam_operasi, "Laporan Diharapkan": maksimal_data,
+                "Jam Operasional": jam_operasi, 
+                "Interval Pengiriman": "30 Menit" if sends_half_hourly else "1 Jam",
+                "Laporan Diharapkan": maksimal_data,
                 "Laporan Masuk": jumlah_data, "Ketersediaan (%)": persentase, 
                 "Catatan": "; ".join(flags) if flags else "✅ Lengkap"
             })
             nomor += 1
     return pd.DataFrame(rows)
 
-async def run_full_analysis(tahun, bulan, use_interval_filter):
+async def run_full_analysis(tahun, bulan):
     token = await login_bmgk()
     if not token: return None
     
@@ -134,7 +165,7 @@ async def run_full_analysis(tahun, bulan, use_interval_filter):
             st.error("Gagal memuat data stasiun. Proses dibatalkan.")
             return None
     
-    df = process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, use_interval_filter)
+    df = process_and_analyze_metar(metar_data, station_info_map, tahun, bulan)
     return df
 
 # ===================== AUTENTIKASI =====================
@@ -158,63 +189,60 @@ with st.sidebar:
 st.title("📡 Dashboard Analisis Ketersediaan METAR")
 st.markdown("Gunakan ini untuk menganalisis ketersediaan data METAR berdasarkan bulan & tahun.")
 
-# --- SEMUA INPUT DAN FILTER DIKELOMPOKKAN DALAM SATU FORM ---
 with st.form("form_analisis"):
     st.markdown("### 1. Atur Parameter Analisis")
     
-    # Input Periode
     col1, col2 = st.columns(2)
     with col1:
         bulan = st.selectbox("📆 Pilih Bulan", list(range(1, 13)), index=datetime.now().month - 1)
     with col2:
         tahun = st.number_input("📅 Masukkan Tahun", min_value=2000, max_value=2100, value=datetime.now().year)
     
-    # Input Mode Analisis
-    use_interval_filter = st.checkbox("☑️ Aktifkan mode interval (hitung maks 1 laporan per jam)")
-
     st.markdown("---")
     st.markdown("### 2. Saring Hasil Tampilan (Opsional)")
     
-    # Filter Tampilan
     fcol1, fcol2 = st.columns(2)
     with fcol1:
         op_hours_option = st.selectbox("Filter Jam Operasional", ["Semua", "24 Jam", "Di Bawah 24 Jam"])
     with fcol2:
         station_type_option = st.selectbox("Filter Tipe Stasiun", ["Semua", "Stasiun", "AWOS"])
 
-    # Tombol Submit Utama
     submit = st.form_submit_button("🚀 Jalankan Analisis")
 
-# --- SELURUH PROSES HANYA BERJALAN SETELAH TOMBOL DITEKAN ---
 if submit:
     with st.spinner("⏳ Mengambil & memproses data dari API secara paralel..."):
-        df = asyncio.run(run_full_analysis(tahun, bulan, use_interval_filter))
+        df = asyncio.run(run_full_analysis(tahun, bulan))
 
     if df is not None and not df.empty:
         st.success("✅ Data berhasil dianalisis.")
         
-        # --- MENERAPKAN FILTER TAMPILAN ---
-        # Filter lanjutan diterapkan di sini setelah data utama didapat
+        st.markdown("### Saring Hasil Analisis")
+        fcol1, fcol2, fcol3 = st.columns(3)
+        
+        with fcol1:
+            op_hours_option_display = st.selectbox("Filter Jam Operasional", ["Semua", "24 Jam", "Di Bawah 24 Jam"], key="op_display", index=["Semua", "24 Jam", "Di Bawah 24 Jam"].index(op_hours_option))
+        with fcol2:
+            station_type_option_display = st.selectbox("Filter Tipe Stasiun", ["Semua", "Stasiun", "AWOS"], key="type_display", index=["Semua", "Stasiun", "AWOS"].index(station_type_option))
+        
         df_filtered = df.copy()
-
-        if op_hours_option == "24 Jam":
+        if op_hours_option_display == "24 Jam":
             df_filtered = df_filtered[df_filtered["Jam Operasional"] == 24]
-        elif op_hours_option == "Di Bawah 24 Jam":
+        elif op_hours_option_display == "Di Bawah 24 Jam":
             df_filtered = df_filtered[df_filtered["Jam Operasional"] < 24]
 
-        if station_type_option == "Stasiun":
+        if station_type_option_display == "Stasiun":
             df_filtered = df_filtered[df_filtered["Nama Stasiun"].str.contains("stasiun", case=False, na=False)]
-        elif station_type_option == "AWOS":
+        elif station_type_option_display == "AWOS":
             df_filtered = df_filtered[df_filtered["Nama Stasiun"].str.contains("awos", case=False, na=False)]
-        
-        # Filter ICAO tetap di sini karena opsinya bergantung pada data yang sudah di-fetch
+            
         semua_stasiun = sorted(df_filtered["ICAO"].dropna().unique())
-        dipilih = st.multiselect("📍 Filter Stasiun (ICAO)", semua_stasiun, default=semua_stasiun)
-        df_filtered = df_filtered[df_filtered["ICAO"].isin(dipilih)]
+        with fcol3:
+            dipilih = st.multiselect("Filter Stasiun (ICAO)", semua_stasiun, default=semua_stasiun)
         
-        st.markdown("---")
+        df_filtered = df_filtered[df_filtered["ICAO"].isin(dipilih)]
 
-        # --- Sisa tampilan UI menggunakan df_filtered ---
+        st.markdown("---")
+        
         st.markdown("## 📊 Ringkasan Data")
         scol1, scol2 = st.columns(2)
         total_bulanan = df_filtered['Laporan Masuk'].sum()
