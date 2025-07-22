@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # ==================== FUNGSI BACKEND ====================
 async def login_bmgk():
     url = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu/@login"
-    payload = {"username": "pdbshift", "password": "2025Lancar!"}
+    payload = {"username": "$2b$12$RTiuLmbnQDlxhKl51Cgpee5ywBefSUhuWQwcX1J/N3ehkPh6wfdqS", "password": "$2b$12$wjkcOvGTyd/9NLC.zcmcUOuAq2yEDTgKh97qh45jwTKVhHZqO6g7u"}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=10) as response:

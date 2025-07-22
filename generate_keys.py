@@ -1,7 +1,7 @@
 import bcrypt
 
 # Daftar password yang ingin di-hash
-passwords_to_hash = ['bmkgmetar', 'mnbvzxcvlkjhasdf']
+passwords_to_hash = ['bmkgmetar', '2025Lancar!', 'pdbshift']
 
 hashed_passwords = []
 for password in passwords_to_hash:
