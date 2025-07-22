@@ -8,7 +8,7 @@ credentials:
       password: '$2b$12$VSv39U0GKcGjHDk.hFKPPOrNnqOzYWg8XwU4EWDiPFIg0Hw00Wzam'
     admin:
       email: admin@example.com
-      name: Rebecca Briggs
+      name: admin
       password: '$2b$12$noMWgbezPYJ2RxBi9z9/J.4xYpFBNw/s6/cMnLt2dSwP6SZ0gNm..'
 
 cookie:
