@@ -17,7 +17,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # ==================== FUNGSI BACKEND ====================
 async def login_bmgk():
     url = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu/@login"
-    payload = {"username": "pdbshift", "password": "$2b$12$wjkcOvGTyd/9NLC.zcmcUOuAq2yEDTgKh97qh45jwTKVhHZqO6g7u"}
+    
+    # Ambil kredensial dengan aman dari st.secrets
+    try:
+        payload = {
+            "username": st.secrets["api_credentials"]["username"],
+            "password": st.secrets["api_credentials"]["password"]
+        }
+    except Exception as e:
+        st.error(f"❌ Gagal memuat kredensial API dari secrets.toml: {e}")
+        return None
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=10) as response:
@@ -25,7 +35,7 @@ async def login_bmgk():
                 data = await response.json()
                 return data.get("token")
     except Exception as e:
-        st.error(f"❌ Login gagal: {e}")
+        st.error(f"❌ Login API gagal: {e}")
         return None
 
 async def fetch_all_stations_info(token, session):
