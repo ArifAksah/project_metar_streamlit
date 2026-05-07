@@ -292,3 +292,62 @@ if st.session_state.run_analysis:
             )
         else:
             st.info("Tidak ada data SE_OPMET yang cocok dengan filter yang Anda terapkan.")
+        
+        # 4. Siapkan dan Tampilkan Rekapan Data Metar MDM
+        st.markdown("---")
+        st.markdown("## 📊 Rekapan Data Metar MDM")
+        
+        # Urutan stasiun MDM sesuai gambar (22 stasiun)
+        mdm_stations_order = [
+            "WAAA", "WAEG", "WAEL", "WAES", "WAFB", "WAFL", "WAFM", "WAFW",
+            "WAMM", "WAPC", "WAPF", "WAPN", "WAPP", "WAPS", "WAPU", "WAWB",
+            "WIBB", "WIEE", "WIMA", "WITC", "WITN", "WITT"
+        ]
+        
+        # Filter data untuk stasiun MDM dari df (data mentah, BUKAN df_filtered)
+        # Supaya tidak terpengaruh filter user
+        df_mdm = df[df['ICAO'].isin(mdm_stations_order)].copy()
+        
+        # Debug: tampilkan stasiun yang ditemukan vs tidak ditemukan
+        stasiun_ditemukan = set(df_mdm['ICAO'].unique())
+        stasiun_tidak_ditemukan = set(mdm_stations_order) - stasiun_ditemukan
+        
+        st.info(f"📊 Ditemukan {len(stasiun_ditemukan)} dari {len(mdm_stations_order)} stasiun MDM")
+        if stasiun_tidak_ditemukan:
+            st.warning(f"⚠️ Stasiun yang tidak ditemukan di data API: {', '.join(sorted(stasiun_tidak_ditemukan))}")
+        
+        if not df_mdm.empty:
+            # Urutkan sesuai urutan yang ditentukan
+            df_mdm['sort_order'] = df_mdm['ICAO'].map({icao: idx for idx, icao in enumerate(mdm_stations_order)})
+            df_mdm = df_mdm.sort_values(['sort_order', 'Tanggal']).drop('sort_order', axis=1).reset_index(drop=True)
+            
+            st.dataframe(df_mdm)
+            
+            # Buat summary dan Excel dari data df_mdm
+            summary_df_mdm = create_summary_table(df_mdm)
+            
+            # Urutkan summary juga sesuai urutan MDM
+            summary_df_mdm_sorted = summary_df_mdm.iloc[:-1].copy()  # Ambil semua kecuali baris rata-rata
+            summary_df_mdm_sorted['sort_order'] = summary_df_mdm_sorted['ICAO'].map({icao: idx for idx, icao in enumerate(mdm_stations_order)})
+            summary_df_mdm_sorted = summary_df_mdm_sorted.sort_values('sort_order').drop('sort_order', axis=1)
+            
+            # Gabungkan kembali dengan baris rata-rata keseluruhan
+            summary_df_mdm_final = pd.concat([summary_df_mdm_sorted, summary_df_mdm.iloc[-1:]], ignore_index=True)
+            
+            st.dataframe(summary_df_mdm_final)
+            
+            excel_bytes_mdm = create_multisheet_excel({
+                "Data Harian (MDM)": df_mdm,
+                "Rekap Bulanan (MDM)": summary_df_mdm_final.iloc[:-1],
+                "Rekap Keseluruhan (MDM)": summary_df_mdm_final.iloc[-1:]
+            })
+            
+            st.download_button(
+                label="⬇️ Download Laporan MDM (.xlsx)",
+                data=excel_bytes_mdm,
+                file_name=f"laporan_mdm_{st.session_state.bulan_select}_{st.session_state.tahun_input}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_mdm_excel"
+            )
+        else:
+            st.info("Tidak ada data MDM yang cocok dengan filter yang Anda terapkan.")
