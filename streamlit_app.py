@@ -27,13 +27,25 @@ async def login_bmgk():
         st.error(f"❌ Login API gagal: {e}")
         return None
 
-async def fetch_station_and_metar_data(tahun, bulan):
+async def fetch_station_and_metar_data(tahun, bulan, progress_callback=None):
+    def log(msg):
+        if progress_callback:
+            progress_callback(msg)
+        logging.info(msg)
+    
+    log("🔐 Memulai login ke API BMKG...")
     token = await login_bmgk()
-    if not token: return None, None
+    if not token: 
+        log("❌ Login gagal!")
+        return None, None
+    log("✅ Login berhasil, token diperoleh")
+    
     headers = {"Authorization": f"Bearer {token}"}
     async with aiohttp.ClientSession() as session:
         params_station = {"type_name": "BmkgStation", "_metadata": "station_name,station_operating_hours,station_icao,station_wmo_id,is_metar_half_hourly", "_size": 2000}
         url = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu//@search"
+        
+        log("📡 Mengambil data stasiun...")
         try:
             async with session.get(url, headers=headers, params=params_station, timeout=30) as response:
                 response.raise_for_status()
@@ -45,12 +57,17 @@ async def fetch_station_and_metar_data(tahun, bulan):
                         "sends_half_hourly": item.get("is_metar_half_hourly", False)
                     } for item in items if item.get("station_icao")
                 }
+                log(f"✅ Data {len(station_map)} stasiun berhasil diambil")
         except Exception as e:
-            st.warning(f"Gagal mengambil info stasiun: {e}")
+            log(f"❌ Gagal mengambil info stasiun: {e}")
             return None, None
+        
         start_date, end_date = datetime(tahun, bulan, 1), (datetime(tahun, bulan + 1, 1) - timedelta(seconds=1)) if bulan < 12 else datetime(tahun, 12, 31, 23, 59, 59)
         params_metar = { "type_name": "GTSMessage", "_metadata": "timestamp_data,cccc,station_wmo_id,ttaaii", "type_message": 4, "timestamp_data__gte": start_date.strftime("%Y-%m-%dT00:00:00"), "timestamp_data__lte": end_date.strftime("%Y-%m-%dT23:59:59"), "_size": 10000 }
+        
+        log(f"📊 Mengambil data METAR periode {bulan}/{tahun}...")
         metar_data, offset = [], 0
+        batch_count = 0
         while True:
             params_metar["_from"] = offset
             try:
@@ -60,9 +77,13 @@ async def fetch_station_and_metar_data(tahun, bulan):
                     if not items: break
                     metar_data.extend(items)
                     offset += len(items)
+                    batch_count += 1
+                    log(f"📦 Batch {batch_count}: {len(items)} data diambil (Total: {len(metar_data)} data)")
             except Exception as e:
-                st.error(f"Gagal mengambil data METAR: {e}. Data mungkin tidak lengkap.")
+                log(f"❌ Gagal mengambil data METAR: {e}. Data mungkin tidak lengkap.")
                 break
+        
+        log(f"✅ Selesai! Total {len(metar_data)} data METAR berhasil diambil")
         return station_map, metar_data
 
 def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, calculation_mode):
@@ -148,18 +169,34 @@ def handle_date_change():
     st.session_state.options_loaded = False
     st.session_state.run_analysis = False
 
-st.markdown("### 1. Pilih Periode")
-st.info("Ubah bulan atau tahun di bawah ini. Opsi filter akan otomatis dimuat setelah data mentah berhasil diambil.")
-col1, col2 = st.columns(2)
+st.markdown("### 1. Pilih Periode dan Muat Data")
+col1, col2, col3 = st.columns([2, 2, 1])
 now = datetime.now()
 last_month = now.month - 1 if now.month > 1 else 12
 tahun_default = now.year if now.month > 1 else now.year - 1
 col1.selectbox("📆 Pilih Bulan", list(range(1, 13)), index=last_month - 1, key='bulan_select', on_change=handle_date_change)
 col2.number_input("📅 Masukkan Tahun", min_value=2020, max_value=2100, value=tahun_default, key='tahun_input', on_change=handle_date_change)
 
-if not st.session_state.options_loaded:
-    with st.spinner("⏳ Mengambil data mentah dan opsi filter dari API..."):
-        station_map, metar_data = asyncio.run(fetch_station_and_metar_data(st.session_state.tahun_input, st.session_state.bulan_select))
+# Tombol untuk muat data
+tombol_muat_diklik = col3.button("📥 Muat Data", type="primary", use_container_width=True)
+
+# Proses muat data HANYA jika tombol diklik
+if tombol_muat_diklik:
+    # Buat container untuk log progress
+    progress_container = st.empty()
+    log_container = st.empty()
+    log_messages = []
+    
+    def update_progress(msg):
+        log_messages.append(msg)
+        log_container.text_area("📋 Log Progress:", "\n".join(log_messages), height=200)
+    
+    with st.spinner("⏳ Sedang memproses..."):
+        station_map, metar_data = asyncio.run(fetch_station_and_metar_data(
+            st.session_state.tahun_input, 
+            st.session_state.bulan_select,
+            progress_callback=update_progress
+        ))
         if station_map and metar_data:
             st.session_state.station_map = station_map
             st.session_state.metar_data = metar_data
@@ -167,25 +204,30 @@ if not st.session_state.options_loaded:
             st.session_state.icao_options = sorted(temp_df['cccc'].dropna().unique())
             st.session_state.ttaaii_options = sorted(temp_df['ttaaii'].dropna().unique())
             st.session_state.options_loaded = True
+            st.success("🎉 Data berhasil dimuat!")
             st.rerun()
         else:
             st.error("Gagal memuat data. Tidak ada data untuk periode ini atau terjadi error API.")
             st.stop()
 
-with st.form("form_analisis_lengkap"):
-    st.markdown("### 2. Atur Parameter dan Jalankan Analisis")
-    st.success(f"✅ Opsi filter untuk **{st.session_state.bulan_select}-{st.session_state.tahun_input}** siap. Atur semua filter di bawah ini.")
-    
-    calculation_mode = st.radio("Mode Kalkulasi", ["Otomatis", "Paksa 1 Jam"], key="calc_mode", horizontal=True)
-    fcol1, fcol2 = st.columns(2)
-    fcol3, fcol4 = st.columns(2)
-    with fcol1: op_hours_option = st.selectbox("Jam Operasional", ["Semua", "24 Jam", "Di Bawah 24 Jam"])
-    with fcol2: station_type_option = st.selectbox("Tipe Stasiun", ["Semua", "Stasiun", "AWOS"])
-    with fcol3: stasiun_dipilih = st.multiselect("Stasiun (ICAO)", st.session_state.icao_options, default=st.session_state.icao_options)
-    with fcol4: heading_dipilih = st.multiselect("Heading Metar (TTAAII)", st.session_state.ttaaii_options, default=st.session_state.ttaaii_options)
-    
-    if st.form_submit_button("🚀 Jalankan Analisis", type="primary", use_container_width=True):
-        st.session_state.run_analysis = True
+# Tampilkan form hanya jika data sudah dimuat
+if st.session_state.options_loaded:
+    with st.form("form_analisis_lengkap"):
+        st.markdown("### 2. Atur Parameter dan Jalankan Analisis")
+        st.success(f"✅ Opsi filter untuk **{st.session_state.bulan_select}-{st.session_state.tahun_input}** siap. Atur semua filter di bawah ini.")
+        
+        calculation_mode = st.radio("Mode Kalkulasi", ["Otomatis", "Paksa 1 Jam"], key="calc_mode", horizontal=True)
+        fcol1, fcol2 = st.columns(2)
+        fcol3, fcol4 = st.columns(2)
+        with fcol1: op_hours_option = st.selectbox("Jam Operasional", ["Semua", "24 Jam", "Di Bawah 24 Jam"])
+        with fcol2: station_type_option = st.selectbox("Tipe Stasiun", ["Semua", "Stasiun", "AWOS"])
+        with fcol3: stasiun_dipilih = st.multiselect("Stasiun (ICAO)", st.session_state.icao_options, default=st.session_state.icao_options)
+        with fcol4: heading_dipilih = st.multiselect("Heading Metar (TTAAII)", st.session_state.ttaaii_options, default=st.session_state.ttaaii_options)
+        
+        if st.form_submit_button("🚀 Jalankan Analisis", type="primary", use_container_width=True):
+            st.session_state.run_analysis = True
+else:
+    st.info("👆 Klik tombol **'📥 Muat Data'** untuk mengambil data dari API dan memulai analisis.")
 
 if st.session_state.run_analysis:
     with st.spinner("🚀 Menganalisis data..."):

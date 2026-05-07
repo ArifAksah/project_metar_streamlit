@@ -13,9 +13,9 @@ credentials:
 
 cookie:
   # Nama cookie yang akan disimpan di browser
-  name: some_cookie_name
-  # Kunci rahasia untuk menandatangani cookie (buat string acak)
-  key: some_secret_key_123
+  name: metar_dashboard_cookie
+  # Kunci rahasia untuk menandatangani cookie (minimal 32 karakter untuk keamanan)
+  key: bmkg_metar_secure_key_2025_rahasia_ddk_project_streamlit
   # Masa berlaku cookie dalam hari
   expiry_days: 30
 
