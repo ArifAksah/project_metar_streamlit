@@ -16,28 +16,82 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # ==================== FUNGSI BACKEND ====================
 async def login_bmgk():
-    url = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu/@login"
+    url = "https://bmkgsatu.bmkg.go.id/api/v21/user/session/login"
     try:
         payload = { "username": st.secrets["api_credentials"]["username"], "password": st.secrets["api_credentials"]["password"] }
+        timeout = aiohttp.ClientTimeout(total=15)
+        
+        logging.info(f"Attempting login to: {url}")
+        logging.info(f"Username: {st.secrets['api_credentials']['username']}")
+        
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=15) as response:
+            async with session.post(url, json=payload, timeout=timeout) as response:
+                status_code = response.status
+                logging.info(f"Login response status: {status_code}")
+                
+                result = await response.json()
+                logging.info(f"Login response body: {result}")
+                
                 response.raise_for_status()
-                return (await response.json()).get("token")
+                
+                # New response structure: {"status": value, "code": value, "data": {"exp": value, "token": value}}
+                if result.get("data") and result["data"].get("token"):
+                    token = result["data"]["token"]
+                    logging.info(f"✅ Login successful! Token received (length: {len(token)})")
+                    return token
+                else:
+                    logging.error(f"❌ Login failed: No token in response. Response: {result}")
+                    st.error(f"❌ Login gagal: Response tidak mengandung token. Response: {result}")
+                    return None
+    except aiohttp.ClientResponseError as e:
+        logging.error(f"❌ HTTP Error during login: {e.status} - {e.message}")
+        st.error(f"❌ Login API gagal (HTTP {e.status}): {e.message}")
+        return None
     except Exception as e:
-        st.error(f"❌ Login API gagal: {e}")
+        logging.error(f"❌ Exception during login: {type(e).__name__} - {str(e)}")
+        st.error(f"❌ Login API gagal: {type(e).__name__} - {str(e)}")
         return None
 
-async def fetch_station_and_metar_data(tahun, bulan):
+async def fetch_station_and_metar_data(tahun, bulan, progress_callback=None):
+    """
+    Fetch station and METAR data with progress tracking
+    progress_callback: function to update progress (step_name, current, total, message)
+    """
+    # Step 1: Login
+    if progress_callback:
+        progress_callback("Login", 0, 4, "🔐 Melakukan login ke API BMKG...")
+    
     token = await login_bmgk()
-    if not token: return None, None
+    if not token:
+        if progress_callback:
+            progress_callback("Login", 0, 4, "❌ Login gagal!")
+        return None, None
+    
+    if progress_callback:
+        progress_callback("Login", 1, 4, "✅ Login berhasil!")
+    
     headers = {"Authorization": f"Bearer {token}"}
     async with aiohttp.ClientSession() as session:
+        # Step 2: Fetch station info
+        if progress_callback:
+            progress_callback("Station", 1, 4, "📡 Mengambil informasi stasiun...")
+        
         params_station = {"type_name": "BmkgStation", "_metadata": "station_name,station_operating_hours,station_icao,station_wmo_id,is_metar_half_hourly", "_size": 2000}
-        url = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu//@search"
+        url_station = "https://bmkgsatu.bmkg.go.id/db/bmkgsatu//@search"
         try:
-            async with session.get(url, headers=headers, params=params_station, timeout=30) as response:
+            logging.info(f"Fetching station data from: {url_station}")
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with session.get(url_station, headers=headers, params=params_station, timeout=timeout) as response:
+                status_code = response.status
+                logging.info(f"Station data response status: {status_code}")
+                
                 response.raise_for_status()
-                items = (await response.json()).get("items", [])
+                result = await response.json()
+                logging.info(f"Station data response keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
+                
+                items = result.get("items", [])
+                logging.info(f"Number of station items: {len(items)}")
+                
                 station_map = {
                     item.get("station_icao"): {
                         "stasiun": item.get("station_name", "-"), "wmo_id": item.get("station_wmo_id", "-"),
@@ -45,24 +99,144 @@ async def fetch_station_and_metar_data(tahun, bulan):
                         "sends_half_hourly": item.get("is_metar_half_hourly", False)
                     } for item in items if item.get("station_icao")
                 }
+                
+                logging.info(f"✅ Station map created with {len(station_map)} stations")
+                
+                if progress_callback:
+                    progress_callback("Station", 2, 4, f"✅ Berhasil mengambil {len(station_map)} stasiun")
+                    
         except Exception as e:
-            st.warning(f"Gagal mengambil info stasiun: {e}")
+            if progress_callback:
+                progress_callback("Station", 2, 4, f"❌ Gagal mengambil info stasiun: {e}")
+            logging.error(f"❌ Error fetching station data: {type(e).__name__} - {str(e)}", exc_info=True)
             return None, None
-        start_date, end_date = datetime(tahun, bulan, 1), (datetime(tahun, bulan + 1, 1) - timedelta(seconds=1)) if bulan < 12 else datetime(tahun, 12, 31, 23, 59, 59)
-        params_metar = { "type_name": "GTSMessage", "_metadata": "timestamp_data,cccc,station_wmo_id,ttaaii", "type_message": 4, "timestamp_data__gte": start_date.strftime("%Y-%m-%dT00:00:00"), "timestamp_data__lte": end_date.strftime("%Y-%m-%dT23:59:59"), "_size": 10000 }
-        metar_data, offset = [], 0
-        while True:
-            params_metar["_from"] = offset
-            try:
-                async with session.get(url, headers=headers, params=params_metar, timeout=60) as response:
-                    response.raise_for_status()
-                    items = (await response.json()).get("items", [])
-                    if not items: break
-                    metar_data.extend(items)
-                    offset += len(items)
-            except Exception as e:
-                st.error(f"Gagal mengambil data METAR: {e}. Data mungkin tidak lengkap.")
-                break
+        
+        # Step 3: Fetch METAR data using new endpoint
+        if progress_callback:
+            progress_callback("METAR", 2, 4, "📊 Memulai pengambilan data METAR...")
+        
+        start_date = datetime(tahun, bulan, 1)
+        num_days = ((datetime(tahun, bulan + 1, 1) if bulan < 12 else datetime(tahun + 1, 1, 1)) - start_date).days
+        metar_data = []
+        logging.info(f"Mulai ambil METAR {tahun}-{bulan:02d} menggunakan endpoint baru...")
+        
+        # Fetch data for each day in the month
+        for day in range(num_days):
+            current_date = start_date + timedelta(days=day)
+            date_str = current_date.strftime("%Y-%m-%d")
+            
+            # Update progress for each day
+            if progress_callback:
+                progress_callback("METAR", 2, 4, f"📅 Mengambil data tanggal {date_str} ({day+1}/{num_days})")
+            
+            # New endpoint: GET https://bmkgsatu.bmkg.go.id/api/v21/monitoring/gts/metar/daily/date/2026-06-01
+            url_metar = f"https://bmkgsatu.bmkg.go.id/api/v21/monitoring/gts/metar/daily/date/{date_str}"
+            
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=120)
+                    logging.info(f"Fetching METAR for {date_str} from: {url_metar}")
+                    
+                    async with session.get(url_metar, headers=headers, timeout=timeout) as response:
+                        status_code = response.status
+                        logging.info(f"METAR {date_str} response status: {status_code}")
+                        
+                        response.raise_for_status()
+                        result = await response.json()
+                        
+                        logging.info(f"METAR {date_str} response type: {type(result).__name__}")
+                        if isinstance(result, dict):
+                            logging.info(f"METAR {date_str} response keys: {result.keys()}")
+                        
+                        # Process the response data
+                        daily_data = []
+                        
+                        # Check if result is a dict with "data" key or directly a list
+                        if isinstance(result, dict) and result.get("data"):
+                            daily_data = result["data"]
+                            logging.info(f"METAR {date_str}: Found data in 'data' key, {len(daily_data)} items")
+                        elif isinstance(result, list):
+                            # If API returns list directly
+                            daily_data = result
+                            logging.info(f"METAR {date_str}: Response is list directly, {len(daily_data)} items")
+                        else:
+                            logging.warning(f"METAR {date_str}: Unexpected response format: {result}")
+                        
+                        # Convert the new format to match the old format expected by process_and_analyze_metar
+                        if daily_data and isinstance(daily_data, list):
+                            # Log first item to see structure
+                            if len(daily_data) > 0:
+                                first_item = daily_data[0]
+                                logging.info(f"METAR {date_str}: First item type: {type(first_item)}")
+                                logging.info(f"METAR {date_str}: First item sample: {first_item}")
+                                
+                                if isinstance(first_item, dict):
+                                    logging.info(f"METAR {date_str}: First item keys: {first_item.keys()}")
+                                elif isinstance(first_item, list):
+                                    logging.info(f"METAR {date_str}: First item is list with {len(first_item)} elements")
+                            
+                            items_added = 0
+                            for item in daily_data:
+                                if isinstance(item, dict):
+                                    # Item is a dictionary
+                                    metar_record = {
+                                        "cccc": item.get("cccc"),
+                                        "timestamp_data": item.get("timestamp_data"),
+                                        "ttaaii": item.get("ttaaii"),
+                                        "station_wmo_id": item.get("station_wmo_id")
+                                    }
+                                    metar_data.append(metar_record)
+                                    items_added += 1
+                                elif isinstance(item, list):
+                                    # Item is a list - need to map to dict
+                                    # Assuming format: [cccc, timestamp_data, ttaaii, station_wmo_id, ...]
+                                    # We need to see the actual data to know the correct mapping
+                                    if len(item) >= 4:
+                                        metar_record = {
+                                            "cccc": item[0] if len(item) > 0 else None,
+                                            "timestamp_data": item[1] if len(item) > 1 else None,
+                                            "ttaaii": item[2] if len(item) > 2 else None,
+                                            "station_wmo_id": item[3] if len(item) > 3 else None
+                                        }
+                                        metar_data.append(metar_record)
+                                        items_added += 1
+                                    else:
+                                        logging.warning(f"METAR {date_str}: List item has only {len(item)} elements, expected at least 4")
+                                else:
+                                    logging.warning(f"METAR {date_str}: Item is neither dict nor list: {type(item)}")
+                            
+                            logging.info(f"✅ Tanggal {date_str}: {len(daily_data)} records processed, {items_added} items added to metar_data")
+                            logging.info(f"Current total metar_data length: {len(metar_data)}")
+                        else:
+                            logging.warning(f"METAR {date_str}: daily_data is empty or not a list")
+                        
+                        break
+                except asyncio.TimeoutError:
+                    if retry < max_retries - 1:
+                        logging.warning(f"⏳ Timeout untuk tanggal {date_str}, retry {retry+1}/{max_retries}...")
+                        if progress_callback:
+                            progress_callback("METAR", 2, 4, f"⏳ Timeout {date_str}, retry {retry+1}/{max_retries}...")
+                        await asyncio.sleep(5)
+                    else:
+                        logging.warning(f"⏳ Max retries reached for {date_str}. Melanjutkan ke tanggal berikutnya.")
+                        break
+                except aiohttp.ClientResponseError as e:
+                    logging.error(f"❌ HTTP Error untuk {date_str}: {e.status} - {e.message}")
+                    break
+                except Exception as e:
+                    logging.error(f"❌ Exception untuk {date_str}: {type(e).__name__} - {str(e)}", exc_info=True)
+                    break
+        
+        # Step 4: Complete
+        logging.info(f"📊 Final summary: {len(station_map)} stations, {len(metar_data)} METAR records")
+        
+        if progress_callback:
+            progress_callback("Complete", 4, 4, f"✅ Selesai! Total {len(metar_data)} records METAR")
+        
+        if len(metar_data) == 0:
+            logging.warning("⚠️ WARNING: No METAR data collected! Returning empty result.")
+        
         return station_map, metar_data
 
 def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, calculation_mode):
@@ -138,39 +312,114 @@ with st.sidebar:
 st.title("📡 Dashboard Analisis Ketersediaan METAR")
 
 if 'options_loaded' not in st.session_state:
-    st.session_state.options_loaded = False
+    st.session_state.options_loaded = True  # Skip auto-fetch on first load
     st.session_state.run_analysis = False
-    for key in ['station_map', 'metar_data', 'icao_options', 'ttaaii_options', 'bulan_select', 'tahun_input']:
-        if key in st.session_state:
-            del st.session_state[key]
 
 def handle_date_change():
     st.session_state.options_loaded = False
     st.session_state.run_analysis = False
 
 st.markdown("### 1. Pilih Periode")
-st.info("Ubah bulan atau tahun di bawah ini. Opsi filter akan otomatis dimuat setelah data mentah berhasil diambil.")
-col1, col2 = st.columns(2)
+st.info("Ubah bulan atau tahun di bawah ini, lalu klik tombol Refresh untuk mengambil data.")
+col1, col2, col3 = st.columns(3)
 now = datetime.now()
 last_month = now.month - 1 if now.month > 1 else 12
 tahun_default = now.year if now.month > 1 else now.year - 1
-col1.selectbox("📆 Pilih Bulan", list(range(1, 13)), index=last_month - 1, key='bulan_select', on_change=handle_date_change)
-col2.number_input("📅 Masukkan Tahun", min_value=2020, max_value=2100, value=tahun_default, key='tahun_input', on_change=handle_date_change)
+col1.selectbox("📆 Pilih Bulan", list(range(1, 13)), index=last_month - 1, key='bulan_select')
+col2.number_input("📅 Masukkan Tahun", min_value=2020, max_value=2100, value=tahun_default, key='tahun_input')
+col3.write("")  # Spacer
+col3.write("")  # Spacer
+if col3.button("🔄 Refresh Data", type="primary", use_container_width=True):
+    st.session_state.options_loaded = False
+    st.session_state.run_analysis = False
+    st.rerun()
 
 if not st.session_state.options_loaded:
-    with st.spinner("⏳ Mengambil data mentah dan opsi filter dari API..."):
-        station_map, metar_data = asyncio.run(fetch_station_and_metar_data(st.session_state.tahun_input, st.session_state.bulan_select))
+    # Create progress placeholder
+    progress_placeholder = st.empty()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    def update_progress(step_name, current, total, message):
+        """Update progress display"""
+        progress = int((current / total) * 100)
+        progress_bar.progress(progress)
+        status_text.info(f"**Step {current}/{total}:** {message}")
+    
+    try:
+        station_map, metar_data = asyncio.run(
+            fetch_station_and_metar_data(
+                st.session_state.tahun_input,
+                st.session_state.bulan_select,
+                progress_callback=update_progress
+            )
+        )
+        
         if station_map and metar_data:
             st.session_state.station_map = station_map
             st.session_state.metar_data = metar_data
+            
+            # Create DataFrame and handle potential nested structures
             temp_df = pd.DataFrame(metar_data)
-            st.session_state.icao_options = sorted(temp_df['cccc'].dropna().unique())
-            st.session_state.ttaaii_options = sorted(temp_df['ttaaii'].dropna().unique())
+            
+            # Log DataFrame info for debugging
+            logging.info(f"DataFrame created with {len(temp_df)} rows")
+            logging.info(f"DataFrame columns: {temp_df.columns.tolist()}")
+            logging.info(f"Sample row: {temp_df.iloc[0].to_dict() if len(temp_df) > 0 else 'empty'}")
+            
+            # Flatten any nested dict/list values to strings
+            for col in temp_df.columns:
+                temp_df[col] = temp_df[col].apply(lambda x: str(x) if isinstance(x, (dict, list)) else x)
+            
+            # Extract unique values safely
+            try:
+                st.session_state.icao_options = sorted([x for x in temp_df['cccc'].dropna().unique() if x and str(x) != 'None'])
+                st.session_state.ttaaii_options = sorted([x for x in temp_df['ttaaii'].dropna().unique() if x and str(x) != 'None'])
+                logging.info(f"✅ Extracted {len(st.session_state.icao_options)} ICAO codes and {len(st.session_state.ttaaii_options)} TTAAII codes")
+            except Exception as e:
+                logging.error(f"Error extracting unique values: {e}", exc_info=True)
+                st.error(f"Error processing data: {e}")
+                st.stop()
+            
             st.session_state.options_loaded = True
+            
+            # Clear progress indicators
+            progress_bar.empty()
+            status_text.empty()
+            progress_placeholder.empty()
+            
+            st.success(f"✅ Data berhasil dimuat! {len(metar_data)} records METAR dari {len(station_map)} stasiun")
             st.rerun()
         else:
-            st.error("Gagal memuat data. Tidak ada data untuk periode ini atau terjadi error API.")
+            # Clear progress indicators
+            progress_bar.empty()
+            status_text.empty()
+            progress_placeholder.empty()
+            
+            st.error("❌ **Gagal memuat data**")
+            st.warning("Kemungkinan penyebab:")
+            st.markdown("""
+            - Login API gagal (periksa credentials di `.streamlit/secrets.toml`)
+            - Tidak ada data untuk periode yang dipilih
+            - Koneksi internet bermasalah
+            - Endpoint API tidak dapat diakses
+            """)
+            st.info("💡 **Solusi:** Periksa log di terminal untuk detail error, atau coba periode lain")
             st.stop()
+    except Exception as e:
+        # Clear progress indicators
+        progress_bar.empty()
+        status_text.empty()
+        progress_placeholder.empty()
+        
+        st.error(f"❌ **Error saat mengambil data:** {str(e)}")
+        logging.error(f"Exception in data fetch: {e}", exc_info=True)
+        st.stop()
+
+# Cek apakah data sudah diambil sebelum menampilkan form analisis
+if 'icao_options' not in st.session_state or 'ttaaii_options' not in st.session_state:
+    st.warning("👆 Klik tombol **Refresh Data** di atas untuk mengambil data terlebih dahulu.")
+    st.stop()
 
 with st.form("form_analisis_lengkap"):
     st.markdown("### 2. Atur Parameter dan Jalankan Analisis")
@@ -222,13 +471,29 @@ if st.session_state.run_analysis:
         # 3. Siapkan dan Tampilkan Laporan SE_OPMET berdasarkan data yang SUDAH DIFILTER
         st.markdown("---")
         st.markdown("## 📋 Data Khusus SE_OPMET 2025")
-        se_opmet_indicators = {
-            "WITT", "WIMA", "WITC", "WITN", "WIMM", "WIMB", "WIME", "WIMN", "WIMS", "WIBB", "WIBJ", "WIDD", "WIDN", "WIDS", "WIDT", "WIDO", "WIDM", "WIEE", "WIGG", "WIJJ", "WIJI", "WIPP", "WIKK", "WIKT", "WILL", "WIHH", "WIII", "WIRR", "WICA", "WICC", "WAHL", "WAHS", "WAHQ", "WAHH", "WAHI", "WIOO", "WIOG", "WIOK", "WIOP", "WIOS", "WIOD", "WARR", "WARW", "WART", "WARA", "WADY", "WARD", "WAGG", "WAGI", "WAGB", "WAGS", "WAGM", "WALL", "WALS", "WAQA", "WAQD", "WAQJ", "WAQQ", "WAQT", "WAOO", "WAOK", "WADD", "WATT", "WATC", "WATG", "WATL", "WATM", "WATO", "WATR", "WATS", "WADL", "WADB", "WADS", "WAAA", "WAFB", "WAFM", "WAFJ", "WAWW", "WAWB", "WAWP", "WAFF", "WAFL", "WAFP", "WAFW", "WAMG", "WAMH", "WAMM", "WAEE", "WAEG", "WAEL", "WAES", "WAEW", "WAPP", "WAPU", "WAPN", "WAPA", "WAPC", "WAPS", "WAPF", "WASS", "WASF", "WASK", "WAUU", "WABB", "WABO", "WAJJ", "WAJI", "WABI", "WAYE", "WAKK", "WAKT", "WAVV"
-        }
+        se_opmet_order = (
+            "WAAA", "WAEG", "WAEL", "WAES", "WAFB", "WAFL", "WAFM", "WAFW", "WAMM",
+            "WAPC", "WAPF", "WAPN", "WAPP", "WAPS", "WAPU", "WAWB", "WIBB", "WIEE",
+            "WIMA", "WITC", "WITN", "WITT", "WIMM", "WIMB", "WIME", "WIMN", "WIMS",
+            "WIBJ", "WIDD", "WIDN", "WIDS", "WIDT", "WIDO", "WIDM", "WIGG", "WIJJ",
+            "WIJI", "WIPP", "WIKK", "WIKT", "WILL", "WIHH", "WIII", "WIRR", "WICA",
+            "WICC", "WAHL", "WAHS", "WAHQ", "WAHH", "WAHI", "WIOO", "WIOG", "WIOK",
+            "WIOP", "WIOS", "WIOD", "WARR", "WARW", "WART", "WARA", "WADY", "WARD",
+            "WAGG", "WAGI", "WAGB", "WAGS", "WAGM", "WALL", "WALS", "WAQA", "WAQD",
+            "WAQJ", "WAQQ", "WAQT", "WAOO", "WAOK", "WADD", "WATT", "WATC", "WATG",
+            "WATL", "WATM", "WATO", "WATR", "WATS", "WADL", "WADB", "WADS", "WAFJ",
+            "WAWW", "WAWP", "WAFF", "WAFP", "WAEE", "WAEW", "WAPA", "WASS", "WASF",
+            "WASK", "WAUU", "WABB", "WABO", "WAJJ", "WAJI", "WABI", "WAYE", "WAKK",
+            "WAKT", "WAVV"
+        )
+        se_opmet_indicators = set(se_opmet_order)
         
         # <<< INI BARIS KUNCI PERBAIKANNYA >>>
         # Kita filter dari df_filtered, bukan dari df awal.
+        # Urutkan sesuai daftar SE_OPMET yang sudah ditetapkan.
         df_se_opmet = df_filtered[df_filtered['ICAO'].isin(se_opmet_indicators)].copy()
+        df_se_opmet['ICAO'] = pd.Categorical(df_se_opmet['ICAO'], categories=se_opmet_order, ordered=True)
+        df_se_opmet = df_se_opmet.sort_values('ICAO').reset_index(drop=True)
         
         if not df_se_opmet.empty:
             st.dataframe(df_se_opmet)

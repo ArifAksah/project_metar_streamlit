@@ -1,0 +1,10 @@
+2026-05-07 10:27:29.882 Uvicorn server started on 0.0.0.0:8501
+2026-05-07 10:28:26,521 - INFO - Mulai ambil METAR 2026-04 ...
+2026-05-07 10:28:53,777 - INFO - Halaman 1: 1000 records, total=1000
+2026-05-07 10:29:17,965 - INFO - Halaman 2: 1000 records, total=2000
+2026-05-07 10:29:43,193 - INFO - Halaman 3: 1000 records, total=3000
+2026-05-07 10:30:07,383 - INFO - Halaman 4: 1000 records, total=4000
+2026-05-07 10:30:30,961 - INFO - Halaman 5: 1000 records, total=5000
+2026-05-07 10:30:55,927 - INFO - Halaman 6: 1000 records, total=6000
+2026-05-07 10:31:32,772 - INFO - Halaman 7: 1000 records, total=7000
+2026-05-07 10:32:08,694 - INFO - Halaman 8: 1000 records, total=8000

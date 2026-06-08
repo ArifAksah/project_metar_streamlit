@@ -15,7 +15,7 @@ cookie:
   # Nama cookie yang akan disimpan di browser
   name: some_cookie_name
   # Kunci rahasia untuk menandatangani cookie (buat string acak)
-  key: some_secret_key_123
+  key: some_secret_key_123_this_is_long_enough_now_32b
   # Masa berlaku cookie dalam hari
   expiry_days: 30
 
