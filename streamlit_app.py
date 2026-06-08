@@ -118,115 +118,80 @@ async def fetch_station_and_metar_data(tahun, bulan, progress_callback=None):
         start_date = datetime(tahun, bulan, 1)
         num_days = ((datetime(tahun, bulan + 1, 1) if bulan < 12 else datetime(tahun + 1, 1, 1)) - start_date).days
         metar_data = []
-        logging.info(f"Mulai ambil METAR {tahun}-{bulan:02d} menggunakan endpoint baru...")
-        
-        # Fetch data for each day in the month
+        logging.info(f"Mulai ambil METAR {tahun}-{bulan:02d} via endpoint gts/entry...")
+
+        url_entry = "https://bmkgsatu.bmkg.go.id/api/v21/gts/entry"
+        page_size = 100  # API membatasi maksimal 100 record per request
+
+        # Ambil data per hari, lalu paginasi tiap hari sampai habis.
         for day in range(num_days):
             current_date = start_date + timedelta(days=day)
             date_str = current_date.strftime("%Y-%m-%d")
-            
-            # Update progress for each day
+            date_from = f"{date_str}T00:00:00Z"
+            date_to = f"{date_str}T23:59:59Z"
+
             if progress_callback:
                 progress_callback("METAR", 2, 4, f"📅 Mengambil data tanggal {date_str} ({day+1}/{num_days})")
-            
-            # New endpoint: GET https://bmkgsatu.bmkg.go.id/api/v21/monitoring/gts/metar/daily/date/2026-06-01
-            url_metar = f"https://bmkgsatu.bmkg.go.id/api/v21/monitoring/gts/metar/daily/date/{date_str}"
-            
-            max_retries = 3
-            for retry in range(max_retries):
-                try:
-                    timeout = aiohttp.ClientTimeout(total=120)
-                    logging.info(f"Fetching METAR for {date_str} from: {url_metar}")
-                    
-                    async with session.get(url_metar, headers=headers, timeout=timeout) as response:
-                        status_code = response.status
-                        logging.info(f"METAR {date_str} response status: {status_code}")
-                        
-                        response.raise_for_status()
-                        result = await response.json()
-                        
-                        logging.info(f"METAR {date_str} response type: {type(result).__name__}")
-                        if isinstance(result, dict):
-                            logging.info(f"METAR {date_str} response keys: {result.keys()}")
-                        
-                        # Process the response data
-                        daily_data = []
-                        
-                        # Check if result is a dict with "data" key or directly a list
-                        if isinstance(result, dict) and result.get("data"):
-                            daily_data = result["data"]
-                            logging.info(f"METAR {date_str}: Found data in 'data' key, {len(daily_data)} items")
-                        elif isinstance(result, list):
-                            # If API returns list directly
-                            daily_data = result
-                            logging.info(f"METAR {date_str}: Response is list directly, {len(daily_data)} items")
-                        else:
-                            logging.warning(f"METAR {date_str}: Unexpected response format: {result}")
-                        
-                        # Convert the new format to match the old format expected by process_and_analyze_metar
-                        if daily_data and isinstance(daily_data, list):
-                            # Log first item to see structure
-                            if len(daily_data) > 0:
-                                first_item = daily_data[0]
-                                logging.info(f"METAR {date_str}: First item type: {type(first_item)}")
-                                logging.info(f"METAR {date_str}: First item sample: {first_item}")
-                                
-                                if isinstance(first_item, dict):
-                                    logging.info(f"METAR {date_str}: First item keys: {first_item.keys()}")
-                                elif isinstance(first_item, list):
-                                    logging.info(f"METAR {date_str}: First item is list with {len(first_item)} elements")
-                            
-                            items_added = 0
-                            for item in daily_data:
-                                if isinstance(item, dict):
-                                    # Item is a dictionary
-                                    metar_record = {
-                                        "cccc": item.get("cccc"),
-                                        "timestamp_data": item.get("timestamp_data"),
-                                        "ttaaii": item.get("ttaaii"),
-                                        "station_wmo_id": item.get("station_wmo_id")
-                                    }
-                                    metar_data.append(metar_record)
-                                    items_added += 1
-                                elif isinstance(item, list):
-                                    # Item is a list - need to map to dict
-                                    # Assuming format: [cccc, timestamp_data, ttaaii, station_wmo_id, ...]
-                                    # We need to see the actual data to know the correct mapping
-                                    if len(item) >= 4:
-                                        metar_record = {
-                                            "cccc": item[0] if len(item) > 0 else None,
-                                            "timestamp_data": item[1] if len(item) > 1 else None,
-                                            "ttaaii": item[2] if len(item) > 2 else None,
-                                            "station_wmo_id": item[3] if len(item) > 3 else None
-                                        }
-                                        metar_data.append(metar_record)
-                                        items_added += 1
-                                    else:
-                                        logging.warning(f"METAR {date_str}: List item has only {len(item)} elements, expected at least 4")
-                                else:
-                                    logging.warning(f"METAR {date_str}: Item is neither dict nor list: {type(item)}")
-                            
-                            logging.info(f"✅ Tanggal {date_str}: {len(daily_data)} records processed, {items_added} items added to metar_data")
-                            logging.info(f"Current total metar_data length: {len(metar_data)}")
-                        else:
-                            logging.warning(f"METAR {date_str}: daily_data is empty or not a list")
-                        
+
+            start_index = 0
+            day_count = 0
+            while True:
+                params_entry = {
+                    "start": start_index,
+                    "size": page_size,
+                    "type_message": "metar",
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "order_by": "data_timestamp",
+                    "is_order_by_asc": "false",
+                }
+
+                page_records = None
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        timeout = aiohttp.ClientTimeout(total=120)
+                        async with session.get(url_entry, headers=headers, params=params_entry, timeout=timeout) as response:
+                            response.raise_for_status()
+                            result = await response.json()
+                        page_records = result.get("data", []) if isinstance(result, dict) else (result if isinstance(result, list) else [])
                         break
-                except asyncio.TimeoutError:
-                    if retry < max_retries - 1:
-                        logging.warning(f"⏳ Timeout untuk tanggal {date_str}, retry {retry+1}/{max_retries}...")
-                        if progress_callback:
-                            progress_callback("METAR", 2, 4, f"⏳ Timeout {date_str}, retry {retry+1}/{max_retries}...")
-                        await asyncio.sleep(5)
-                    else:
-                        logging.warning(f"⏳ Max retries reached for {date_str}. Melanjutkan ke tanggal berikutnya.")
+                    except asyncio.TimeoutError:
+                        if retry < max_retries - 1:
+                            logging.warning(f"⏳ Timeout {date_str} start={start_index}, retry {retry+1}/{max_retries}...")
+                            await asyncio.sleep(5)
+                        else:
+                            logging.warning(f"⏳ Max retries reached for {date_str} start={start_index}.")
+                            page_records = []
+                    except aiohttp.ClientResponseError as e:
+                        logging.error(f"❌ HTTP Error {date_str} start={start_index}: {e.status} - {e.message}")
+                        page_records = []
                         break
-                except aiohttp.ClientResponseError as e:
-                    logging.error(f"❌ HTTP Error untuk {date_str}: {e.status} - {e.message}")
+                    except Exception as e:
+                        logging.error(f"❌ Exception {date_str} start={start_index}: {type(e).__name__} - {str(e)}", exc_info=True)
+                        page_records = []
+                        break
+
+                if not page_records:
                     break
-                except Exception as e:
-                    logging.error(f"❌ Exception untuk {date_str}: {type(e).__name__} - {str(e)}", exc_info=True)
+
+                for item in page_records:
+                    if not isinstance(item, dict):
+                        continue
+                    metar_data.append({
+                        "cccc": item.get("cccc"),
+                        "timestamp_data": item.get("data_timestamp"),
+                        "ttaaii": item.get("ttaaii"),
+                        "station_wmo_id": item.get("station_wmo_id"),
+                    })
+                day_count += len(page_records)
+
+                # Halaman terakhir jika jumlah record < page_size
+                if len(page_records) < page_size:
                     break
+                start_index += page_size
+
+            logging.info(f"✅ Tanggal {date_str}: {day_count} record METAR (total {len(metar_data)})")
         
         # Step 4: Complete
         logging.info(f"📊 Final summary: {len(station_map)} stations, {len(metar_data)} METAR records")
