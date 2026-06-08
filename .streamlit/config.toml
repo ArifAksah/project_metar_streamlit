@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+# Warna aksen utama (tombol, highlight) - teal gelap #004040
+primaryColor = "#004040"
+# Latar utama aplikasi - putih
+backgroundColor = "#FFFFFF"
+# Latar komponen (sidebar, input, tabel) - abu-abu sangat terang
+secondaryBackgroundColor = "#F0F5F4"
+# Warna teks - teal gelap agar selaras dengan aksen
+textColor = "#004040"
+font = "sans serif"

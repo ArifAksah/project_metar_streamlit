@@ -14,7 +14,59 @@ import io
 st.set_page_config(page_title="Analisis Ketersediaan METAR", layout="wide")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Tema & styling tampilan dashboard (putih dengan aksen #004040)
+st.markdown(
+    """
+    <style>
+    /* Sembunyikan toolbar bawaan tabel Streamlit (termasuk ikon download CSV).
+       Unduhan data disediakan lewat tombol .xlsx di tiap bagian laporan. */
+    [data-testid="stElementToolbar"] { display: none !important; }
+
+    /* Judul utama dengan aksen teal gelap */
+    h1, h2, h3 { color: #004040 !important; }
+
+    /* Garis pemisah lebih halus */
+    hr { border-color: rgba(0, 64, 64, 0.25) !important; }
+
+    /* Tombol: latar teal gelap, teks putih */
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 8px;
+        background-color: #004040;
+        color: #FFFFFF;
+        border: 1px solid #004040;
+        font-weight: 600;
+        transition: all 0.15s ease-in-out;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        background-color: #006060;
+        color: #FFFFFF;
+        border-color: #006060;
+    }
+
+    /* Tabel/dataframe dengan border teal lembut */
+    [data-testid="stDataFrame"] {
+        border: 1px solid rgba(0, 64, 64, 0.2);
+        border-radius: 8px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ==================== FUNGSI BACKEND ====================
+def _cell_value(cell):
+    """Return the underlying scalar value for an API field.
+
+    The API may return a field either as a plain scalar (e.g. "WAAA") or as a
+    structured "cell" object such as
+    {"index": 0, "key": "cccc", "label": "Station ID", "value": "WAAA"}.
+    This helper normalises both forms to the scalar value.
+    """
+    if isinstance(cell, dict):
+        return cell.get("value")
+    return cell
+
+
 async def login_bmgk():
     url = "https://bmkgsatu.bmkg.go.id/api/v21/user/session/login"
     try:
@@ -163,51 +215,57 @@ async def fetch_station_and_metar_data(tahun, bulan, progress_callback=None):
                         else:
                             logging.warning(f"METAR {date_str}: Unexpected response format: {result}")
                         
-                        # Convert the new format to match the old format expected by process_and_analyze_metar
+                        # Convert the new API format into flat per-observation records.
+                        # Each record in daily_data is one station for this day, expressed
+                        # as a list of "cells". Identity cells carry station info
+                        # (station_id = ICAO, station_name, ...) and the remaining cells
+                        # are half-hour time slots ("00:00" .. "23:30"), each with a
+                        # count "value", a "raw" array of actual observation timestamps,
+                        # and a "status" ("ok" / "no observation").
                         if daily_data and isinstance(daily_data, list):
-                            # Log first item to see structure
-                            if len(daily_data) > 0:
-                                first_item = daily_data[0]
-                                logging.info(f"METAR {date_str}: First item type: {type(first_item)}")
-                                logging.info(f"METAR {date_str}: First item sample: {first_item}")
-                                
-                                if isinstance(first_item, dict):
-                                    logging.info(f"METAR {date_str}: First item keys: {first_item.keys()}")
-                                elif isinstance(first_item, list):
-                                    logging.info(f"METAR {date_str}: First item is list with {len(first_item)} elements")
-                            
                             items_added = 0
+                            stations_seen = 0
                             for item in daily_data:
-                                if isinstance(item, dict):
-                                    # Item is a dictionary
-                                    metar_record = {
-                                        "cccc": item.get("cccc"),
-                                        "timestamp_data": item.get("timestamp_data"),
-                                        "ttaaii": item.get("ttaaii"),
-                                        "station_wmo_id": item.get("station_wmo_id")
-                                    }
-                                    metar_data.append(metar_record)
-                                    items_added += 1
-                                elif isinstance(item, list):
-                                    # Item is a list - need to map to dict
-                                    # Assuming format: [cccc, timestamp_data, ttaaii, station_wmo_id, ...]
-                                    # We need to see the actual data to know the correct mapping
-                                    if len(item) >= 4:
-                                        metar_record = {
-                                            "cccc": item[0] if len(item) > 0 else None,
-                                            "timestamp_data": item[1] if len(item) > 1 else None,
-                                            "ttaaii": item[2] if len(item) > 2 else None,
-                                            "station_wmo_id": item[3] if len(item) > 3 else None
-                                        }
-                                        metar_data.append(metar_record)
+                                if not isinstance(item, list):
+                                    logging.warning(f"METAR {date_str}: station record is not a list: {type(item).__name__}")
+                                    continue
+
+                                cells = {c.get("key"): c for c in item if isinstance(c, dict) and "key" in c}
+                                station_icao = (cells.get("station_id") or {}).get("value")
+                                if not station_icao:
+                                    continue
+                                stations_seen += 1
+                                station_wmo_id = (cells.get("station_wmo_id") or {}).get("value")
+
+                                for key, cell in cells.items():
+                                    # Time-slot cells have keys shaped like "HH:MM".
+                                    if not (isinstance(key, str) and len(key) == 5 and key[2] == ":"):
+                                        continue
+                                    raw = cell.get("raw") or []
+                                    if raw:
+                                        # One observation per raw entry (use real timestamp).
+                                        for r in raw:
+                                            ts = r.get("timestamp_data") if isinstance(r, dict) else None
+                                            if not ts:
+                                                ts = f"{date_str}T{key}:00Z"
+                                            metar_data.append({
+                                                "cccc": station_icao,
+                                                "timestamp_data": ts,
+                                                "ttaaii": "-",
+                                                "station_wmo_id": station_wmo_id,
+                                            })
+                                            items_added += 1
+                                    elif cell.get("status") == "ok":
+                                        # Observed but no raw detail: synthesize slot time.
+                                        metar_data.append({
+                                            "cccc": station_icao,
+                                            "timestamp_data": f"{date_str}T{key}:00Z",
+                                            "ttaaii": "-",
+                                            "station_wmo_id": station_wmo_id,
+                                        })
                                         items_added += 1
-                                    else:
-                                        logging.warning(f"METAR {date_str}: List item has only {len(item)} elements, expected at least 4")
-                                else:
-                                    logging.warning(f"METAR {date_str}: Item is neither dict nor list: {type(item)}")
-                            
-                            logging.info(f"✅ Tanggal {date_str}: {len(daily_data)} records processed, {items_added} items added to metar_data")
-                            logging.info(f"Current total metar_data length: {len(metar_data)}")
+
+                            logging.info(f"✅ Tanggal {date_str}: {stations_seen} stasiun, {items_added} observasi ditambahkan (total {len(metar_data)})")
                         else:
                             logging.warning(f"METAR {date_str}: daily_data is empty or not a list")
                         
@@ -245,9 +303,12 @@ def process_and_analyze_metar(metar_data, station_info_map, tahun, bulan, calcul
         cccc, timestamp, ttaaii = item.get("cccc"), item.get("timestamp_data"), item.get("ttaaii")
         if cccc and timestamp:
             try:
-                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                # Guard against non-string timestamps (e.g. structured cells)
+                if not isinstance(timestamp, str):
+                    timestamp = _cell_value(timestamp)
+                dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
                 harian_per_stasiun[dt.strftime("%Y-%m-%d")][cccc][dt.strftime("%H:%M")] = ttaaii
-            except ValueError: continue
+            except (ValueError, TypeError): continue
     rows, nomor = [], 1
     start_date = datetime(tahun, bulan, 1)
     num_days = ((datetime(tahun, bulan + 1, 1) if bulan < 12 else datetime(tahun + 1, 1, 1)) - start_date).days
@@ -374,8 +435,7 @@ if not st.session_state.options_loaded:
             # Extract unique values safely
             try:
                 st.session_state.icao_options = sorted([x for x in temp_df['cccc'].dropna().unique() if x and str(x) != 'None'])
-                st.session_state.ttaaii_options = sorted([x for x in temp_df['ttaaii'].dropna().unique() if x and str(x) != 'None'])
-                logging.info(f"✅ Extracted {len(st.session_state.icao_options)} ICAO codes and {len(st.session_state.ttaaii_options)} TTAAII codes")
+                logging.info(f"✅ Extracted {len(st.session_state.icao_options)} ICAO codes")
             except Exception as e:
                 logging.error(f"Error extracting unique values: {e}", exc_info=True)
                 st.error(f"Error processing data: {e}")
@@ -417,7 +477,7 @@ if not st.session_state.options_loaded:
         st.stop()
 
 # Cek apakah data sudah diambil sebelum menampilkan form analisis
-if 'icao_options' not in st.session_state or 'ttaaii_options' not in st.session_state:
+if 'icao_options' not in st.session_state:
     st.warning("👆 Klik tombol **Refresh Data** di atas untuk mengambil data terlebih dahulu.")
     st.stop()
 
@@ -433,7 +493,7 @@ if st.session_state.options_loaded:
         with fcol1: op_hours_option = st.selectbox("Jam Operasional", ["Semua", "24 Jam", "Di Bawah 24 Jam"])
         with fcol2: station_type_option = st.selectbox("Tipe Stasiun", ["Semua", "Stasiun", "AWOS"])
         with fcol3: stasiun_dipilih = st.multiselect("Stasiun (ICAO)", st.session_state.icao_options, default=st.session_state.icao_options)
-        with fcol4: heading_dipilih = st.multiselect("Heading Metar (TTAAII)", st.session_state.ttaaii_options, default=st.session_state.ttaaii_options)
+        with fcol4: st.caption("ℹ️ Filter Heading Metar (TTAAII) tidak lagi tersedia karena API monitoring terbaru tidak menyediakan field tersebut.")
         
         if st.form_submit_button("🚀 Jalankan Analisis", type="primary", use_container_width=True):
             st.session_state.run_analysis = True
@@ -449,7 +509,7 @@ if st.session_state.run_analysis:
         elif op_hours_option == "Di Bawah 24 Jam": df_filtered = df_filtered[df_filtered["Jam Operasional"] < 24]
         if station_type_option == "Stasiun": df_filtered = df_filtered[df_filtered["Nama Stasiun"].str.contains("stasiun", case=False, na=False)]
         elif station_type_option == "AWOS": df_filtered = df_filtered[df_filtered["Nama Stasiun"].str.contains("awos", case=False, na=False)]
-        df_filtered = df_filtered[df_filtered["ICAO"].isin(stasiun_dipilih) & df_filtered["Heading Metar"].isin(heading_dipilih)]
+        df_filtered = df_filtered[df_filtered["ICAO"].isin(stasiun_dipilih)]
 
     if df_filtered.empty:
         st.info("ℹ️ Tidak ada data yang cocok dengan filter yang Anda pilih.")
