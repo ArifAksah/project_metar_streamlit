@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import asyncio
 import aiohttp
+import cloudscraper
 from collections import defaultdict
 import logging
 import io
@@ -15,41 +16,39 @@ st.set_page_config(page_title="Analisis Ketersediaan METAR", layout="wide")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ==================== FUNGSI BACKEND ====================
-async def login_bmgk():
+def _sync_login(username, password):
     url = "https://bmkgsatu.bmkg.go.id/api/v21/user/session/login"
+    payload = {"username": username, "password": password}
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False},
+        delay=10,
+    )
+    resp = scraper.post(url, json=payload, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+async def login_bmgk():
     try:
-        payload = { "username": st.secrets["api_credentials"]["username"], "password": st.secrets["api_credentials"]["password"] }
-        timeout = aiohttp.ClientTimeout(total=15)
+        username = st.secrets["api_credentials"]["username"]
+        password = st.secrets["api_credentials"]["password"]
         
-        logging.info(f"Attempting login to: {url}")
-        logging.info(f"Username: {st.secrets['api_credentials']['username']}")
+        logging.info(f"Attempting login via cloudscraper, Username: {username}")
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=timeout) as response:
-                status_code = response.status
-                logging.info(f"Login response status: {status_code}")
-                
-                result = await response.json()
-                logging.info(f"Login response body: {result}")
-                
-                response.raise_for_status()
-                
-                # New response structure: {"status": value, "code": value, "data": {"exp": value, "token": value}}
-                if result.get("data") and result["data"].get("token"):
-                    token = result["data"]["token"]
-                    logging.info(f"✅ Login successful! Token received (length: {len(token)})")
-                    return token
-                else:
-                    logging.error(f"❌ Login failed: No token in response. Response: {result}")
-                    st.error(f"❌ Login gagal: Response tidak mengandung token. Response: {result}")
-                    return None
-    except aiohttp.ClientResponseError as e:
-        logging.error(f"❌ HTTP Error during login: {e.status} - {e.message}")
-        st.error(f"❌ Login API gagal (HTTP {e.status}): {e.message}")
-        return None
+        result = await asyncio.to_thread(_sync_login, username, password)
+        
+        logging.info(f"Login response: {result}")
+        
+        if result.get("data") and result["data"].get("token"):
+            token = result["data"]["token"]
+            logging.info(f"Login successful! Token received (length: {len(token)})")
+            return token
+        else:
+            logging.error(f"Login failed: No token in response. Response: {result}")
+            st.error(f"Login gagal: Response tidak mengandung token. Response: {result}")
+            return None
     except Exception as e:
-        logging.error(f"❌ Exception during login: {type(e).__name__} - {str(e)}")
-        st.error(f"❌ Login API gagal: {type(e).__name__} - {str(e)}")
+        logging.error(f"Exception during login: {type(e).__name__} - {str(e)}")
+        st.error(f"Login API gagal: {type(e).__name__} - {str(e)}")
         return None
 
 async def fetch_station_and_metar_data(tahun, bulan, progress_callback=None):
